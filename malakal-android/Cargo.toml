@@ -1,0 +1,24 @@
+[package]
+name = "malakal-android"
+description = "Malakal on Android: a NativeActivity around libmalakal_android.so, built by cargo-ndk"
+version = "0.1.12"
+edition = "2024"
+license-file = "../LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+malakal = { path = ".." }
+# Same eframe as the desktop app, plus the android-activity `native-activity`
+# backend through egui-winit so `android_main` can hand the app to eframe.
+eframe = { version = "0.37.0", features = ["android-native-activity"] }
+# For the `AndroidApp` glue type eframe's `NativeOptions::android_app` takes.
+winit = "0.30"
+android_logger = "0.14"
+jiff = "0.2"
+log = "0.4"
+# End the process without running exit-time destructors while the system's own
+# threads (the renderer) still use what they free (winit's loop can't restart
+# in the same process, so the next launch must be a fresh one).
+libc = "0.2"

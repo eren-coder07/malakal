@@ -1,0 +1,169 @@
+# Malakal for Android — universal (32-bit + 64-bit) release build.
+#
+# Builds on GitHub's runners: the Gradle project in android/ drives cargo-ndk,
+# which builds libmalakal_android.so for each requested ABI (armv7-linux-androideabi
+# for armeabi-v7a — 32-bit phones — plus aarch64-linux-android for arm64-v8a and
+# x86_64-linux-android for emulators and Intel tablets), then packages one APK
+# per choice and a universal APK carrying both ARM ABIs.
+#
+#   Dispatch with portRevision = 1 → version 0.1.12a (Malakal 0.1.12, port
+#   revision a), tag v0.1.12a-android, and four APKs:
+#     Malakal-0.1.12a-android-universal-arm32-arm64.apk  (every real device)
+#     Malakal-0.1.12a-android-arm64.apk                  (phones, tablets)
+#     Malakal-0.1.12a-android-arm32.apk                  (old 32-bit phones)
+#     Malakal-0.1.12a-android-x86_64.apk                 (emulators, Intel tablets)
+#
+# Release signing: ANDROID_KEYSTORE_B64 (a base64 keystore) plus the three
+# MALAKAL_RELEASE_* passwords as repo secrets; without them the build falls
+# back to the debug key.
+
+name: android-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      portRevision:
+        description: 'Port revision: 0 (none) or 1..26 (becomes a..z after the version)'
+        required: false
+        default: '1'
+      createRelease:
+        description: 'Publish a GitHub release with the APKs'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (drop preinstalled SDK/NDK parts we replace, dotnet, ghc)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf "$ANDROID_HOME/ndk"/* || true
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK (NDK 29.0.14206865, platform 36, build-tools 36)
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: 'true'
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Decode the release keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            KEYSTORE="$RUNNER_TEMP/malakal-release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+            {
+              echo "MALAKAL_RELEASE_KEYSTORE=$KEYSTORE"
+              echo "MALAKAL_RELEASE_STORE_PASSWORD=${{ secrets.MALAKAL_RELEASE_STORE_PASSWORD }}"
+              echo "MALAKAL_RELEASE_KEY_ALIAS=${{ secrets.MALAKAL_RELEASE_KEY_ALIAS }}"
+              echo "MALAKAL_RELEASE_KEY_PASSWORD=${{ secrets.MALAKAL_RELEASE_KEY_PASSWORD }}"
+            } >> "$GITHUB_ENV"
+            echo "release signing: MALAKAL_RELEASE_KEYSTORE"
+          else
+            echo "release signing: debug key (no ANDROID_KEYSTORE_B64 secret)"
+          fi
+
+      - name: Version and tag
+        id: version
+        run: |
+          ver=$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' Cargo.toml | head -1)
+          rev=${{ inputs.portRevision }}
+          letter=""
+          if [ "$rev" -gt 0 ]; then letter=$(printf "\\$(printf '%03o' $((96 + rev)))"); fi
+          name="$ver$letter"
+          tag="v$name-android"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Malakal $name, tag $tag"
+
+      - name: Build the universal APK (arm64-v8a + armeabi-v7a)
+        run: |
+          cd android
+          ./gradlew -q assembleRelease -Pmalakal.abis=arm64-v8a,armeabi-v7a -Pmalakal.portRevision=${{ inputs.portRevision }}
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp app/build/outputs/apk/release/Malakal-${{ steps.version.outputs.name }}-release.apk \
+            "$GITHUB_WORKSPACE/dist/Malakal-${{ steps.version.outputs.name }}-android-universal-arm32-arm64.apk"
+
+      - name: Build the arm64 APK (phones, tablets)
+        run: |
+          cd android
+          ./gradlew -q assembleRelease -Pmalakal.abis=arm64-v8a -Pmalakal.portRevision=${{ inputs.portRevision }}
+          cp app/build/outputs/apk/release/Malakal-${{ steps.version.outputs.name }}-release.apk \
+            "$GITHUB_WORKSPACE/dist/Malakal-${{ steps.version.outputs.name }}-android-arm64.apk"
+
+      - name: Build the 32-bit APK (armeabi-v7a)
+        run: |
+          cd android
+          ./gradlew -q assembleRelease -Pmalakal.abis=armeabi-v7a -Pmalakal.portRevision=${{ inputs.portRevision }}
+          cp app/build/outputs/apk/release/Malakal-${{ steps.version.outputs.name }}-release.apk \
+            "$GITHUB_WORKSPACE/dist/Malakal-${{ steps.version.outputs.name }}-android-arm32.apk"
+
+      - name: Build the x86_64 APK (emulators, Intel tablets)
+        run: |
+          cd android
+          ./gradlew -q assembleRelease -Pmalakal.abis=x86_64 -Pmalakal.portRevision=${{ inputs.portRevision }}
+          cp app/build/outputs/apk/release/Malakal-${{ steps.version.outputs.name }}-release.apk \
+            "$GITHUB_WORKSPACE/dist/Malakal-${{ steps.version.outputs.name }}-android-x86_64.apk"
+
+      - name: Checksums
+        run: (cd dist && sha256sum * > SHA256SUMS.txt) && ls -la dist/
+
+      - name: Release notes
+        run: |
+          name="${{ steps.version.outputs.name }}"
+          tag="${{ steps.version.outputs.tag }}"
+          cat > dist/notes.md <<EOF
+          Malakal $name for Android — **the first Android port of the day-planning calendar app, with 32-bit support built in**.
+
+          Built from [shouya/malakal](https://github.com/shouya/malakal) \`master\` with an Android port on top (this fork). Upstream had no Android support; the port wraps the same eframe app in a \`NativeActivity\` ([the port's README](https://github.com/eren-coder07/malakal/blob/master/android/README.md) has the details).
+
+          **Install:** on an Android 8.0+ phone or tablet, download \`Malakal-$name-android-universal-arm32-arm64.apk\` — it carries both ARM libraries, so it installs on every real device, 32-bit or 64-bit. Per-ABI APKs are there too (\`-arm64\`, \`-arm32\`, \`-x86_64\`) if you want a smaller download. Open the file, allowing installs from that source, or \`adb install -r\` it. Signed with a release key.
+
+          **Works:** the full calendar planner — day columns, event editing, the built-in calendar (ics) storage and the indexed database — on GLES; touch (tap to select and create, the on-screen keyboard for typing); Back closes dialogs. Everything lives in the app's own storage, offline, and the app requests no permissions.
+
+          **Not yet:** desktop notifications (upcoming events) have nothing to pop into on Android; the timezone falls back to UTC unless \`timezone = "Area/City"\` is set in the app's config file.
+
+          Malakal is GPL-3.0; this fork's source (with the port) is at [eren-coder07/malakal](https://github.com/eren-coder07/malakal). SHA-256 checksums are in \`SHA256SUMS.txt\`.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: dist/*
+
+      - name: Publish the GitHub release
+        if: ${{ inputs.createRelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" dist/* \
+            --title "Malakal ${{ steps.version.outputs.name }} for Android — universal, 32-bit + 64-bit" \
+            --notes-file dist/notes.md --latest

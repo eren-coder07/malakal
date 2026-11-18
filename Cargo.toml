@@ -46,3 +46,8 @@ egui_autocomplete = { git = "https://github.com/JakeHandsome/egui_autocomplete.g
 
 [profile.release]
 lto = true
+
+# The Android port crate (built into libmalakal_android.so by cargo-ndk) shares the
+# lockfile with the desktop app: one resolution, one build graph.
+[workspace]
+members = ["malakal-android"]
